@@ -111,7 +111,18 @@ kind load docker-image healthletic-backend:latest --name healthletic-local
 ```
   (the `80` on the right must stay as-is — that's the Service's actual
   port, defined in `values.yaml`; only the left-hand number is your choice)
- 
+### "Kubernetes cluster unrechable" in GitHub Actions 
+
+This is expected if `KUBE_CONFIG_BASE64` points to a local cluster (e.g. a
+`kind` cluster on a laptop). GitHub Actions runs on a temporary cloud
+machine, not your local machine — it can only reach a cluster that's
+actually accessible over the internet (e.g. a real cloud-hosted cluster
+like EKS/GKE/AKS, or a local cluster temporarily exposed via a tunneling
+tool like `ngrok`). In this project, `build`, `security_scan`, and `push`
+were verified against real infrastructure (Docker Hub); `deploy` and
+`smoke_tests` were verified separately, end-to-end, against a real local
+`kind` cluster using `deploy.sh` — see the section above.
+
 ---
  
 ## Rollback Procedures
