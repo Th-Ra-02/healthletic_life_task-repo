@@ -1,0 +1,161 @@
+name: CI/CD Pipeline - Healthletic Backend API
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: healthletic/backend-api
+  HELM_CHART_PATH: ./helm/healthletic-backend
+  HELM_RELEASE: healthletic-backend
+  K8S_NAMESPACE: healthletic
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+  security_scan:
+    name: Vulnerability Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build image for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Run Trivy scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+
+  push:
+    name: Push to Registry
+    runs-on: ubuntu-latest
+    needs: security_scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+  deploy:
+    name: Deploy to Kubernetes (Helm)
+    runs-on: ubuntu-latest
+    needs: push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Configure cluster credentials
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG_BASE64 }}" | base64 -d > "$HOME/.kube/config"
+
+      - name: Lint Helm chart
+        run: helm lint ${{ env.HELM_CHART_PATH }}
+
+      - name: Helm upgrade --install
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE }} ${{ env.HELM_CHART_PATH }} \
+            --namespace ${{ env.K8S_NAMESPACE }} --create-namespace \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ github.sha }} \
+            --wait --timeout 5m --atomic
+
+  smoke_tests:
+    name: Post-Deploy Smoke Tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    outputs:
+      passed: ${{ steps.evaluate.outputs.passed }}
+    steps:
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure cluster credentials
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG_BASE64 }}" | base64 -d > "$HOME/.kube/config"
+
+      - name: Port-forward service
+        run: |
+          kubectl port-forward svc/${{ env.HELM_RELEASE }} 8080:80 -n ${{ env.K8S_NAMESPACE }} &
+          sleep 5
+
+      - name: Check health endpoint
+        id: health
+        run: curl -sf http://localhost:8080/health && echo "ok=true" >> "$GITHUB_OUTPUT" || echo "ok=false" >> "$GITHUB_OUTPUT"
+
+      - name: Evaluate results
+        id: evaluate
+        run: |
+          if [ "${{ steps.health.outputs.ok }}" = "true" ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy, smoke_tests]
+    if: needs.smoke_tests.outputs.passed == 'false'
+    steps:
+      - uses: azure/setup-helm@v4
+      - name: Configure cluster credentials
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG_BASE64 }}" | base64 -d > "$HOME/.kube/config"
+      - name: Roll back release
+        run: helm rollback ${{ env.HELM_RELEASE }} -n ${{ env.K8S_NAMESPACE }} --wait

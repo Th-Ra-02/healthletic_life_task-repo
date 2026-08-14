@@ -1,0 +1,13 @@
+image:
+  repository: docker.io/healthletic/backend-api
+  tag: "1.0.0"
+
+replicaCount: 2
+
+service:
+  port: 80
+  targetPort: 5000
+
+canary:
+  enabled: false
+  weight: 20
