@@ -8,7 +8,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: healthletic/backend-api
+  IMAGE_NAME: thra21/backend-api
   HELM_CHART_PATH: ./helm/healthletic-backend
   HELM_RELEASE: healthletic-backend
   K8S_NAMESPACE: healthletic
